@@ -15,6 +15,7 @@ CLIMATE_MODEL = utils.AdiabatClimateRobust(
     'inputs/stellar_flux.txt'
 )
 CLIMATE_MODEL.verbose = False
+CLIMATE_MODEL.P_top = 1e2
 
 def model(x):
     c = CLIMATE_MODEL
