@@ -6,7 +6,7 @@ from numba import types
 from scipy import integrate
 from scipy import constants as const
 
-from clima import AdiabatClimate, ClimaException
+from photochem.clima import AdiabatClimate, ClimaException
 from photochem import EvoAtmosphere, PhotoException
 
 class AdiabatClimateRobust(AdiabatClimate):

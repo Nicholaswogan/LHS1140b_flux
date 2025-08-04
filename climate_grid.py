@@ -73,7 +73,7 @@ def get_gridvals():
     return gridvals
 
 if __name__ == "__main__":
-    # mpiexec -n 1000 python climate_grid.py
+    # mpiexec -n X python climate_grid.py
     make_grid(
         model_func=model, 
         gridvals=get_gridvals(), 
