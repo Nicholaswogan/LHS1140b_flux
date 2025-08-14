@@ -12,7 +12,7 @@ import utils
 CLIMATE_MODEL = utils.AdiabatClimateRobust(
     'inputs/species_climate.yaml',
     'inputs/settings_climate.yaml',
-    'inputs/stellar_flux.txt'
+    'inputs/GJ1132.txt'
 )
 CLIMATE_MODEL.verbose = False
 CLIMATE_MODEL.P_top = 1e2
@@ -30,10 +30,10 @@ def model(x):
     return result
 
 def x_to_Pi(x, c):
-    log10PN2,log10PCO2,log10PO2,log10PCO,log10PH2,log10PCH4 = x
+    log10PCO2,log10PO2,log10PCO,log10PH2,log10PCH4 = x
     P_i = np.ones(len(c.species_names))*1e-10
     P_i[c.species_names.index('H2O')] = 270.0
-    P_i[c.species_names.index('N2')] = 10.0**log10PN2
+    P_i[c.species_names.index('N2')] = 1.0 # always 1 bar
     P_i[c.species_names.index('CO2')] = 10.0**log10PCO2
     P_i[c.species_names.index('O2')] = 10.0**log10PO2
     P_i[c.species_names.index('CO')] = 10.0**log10PCO
@@ -64,13 +64,12 @@ def make_result(x, c, converged):
     return result
 
 def get_gridvals():
-    log10PN2 = np.array([-1.0, 0.0])
-    log10PCO2 = np.arange(-5,1.01,0.5)
-    log10PO2 = np.arange(-7,1.01,1)
-    log10PCO = np.arange(-7,1.01,1)
-    log10PH2 = np.arange(-6,0.01,1)
-    log10PCH4 = np.arange(-7,1.01,0.5)
-    gridvals = (log10PN2,log10PCO2,log10PO2,log10PCO,log10PH2,log10PCH4)
+    log10PCO2 = np.arange(-5,1.01,1)
+    log10PO2 = np.arange(-7,1.01,2)
+    log10PCO = np.arange(-7,1.01,2)
+    log10PH2 = np.arange(-6,0.01,2)
+    log10PCH4 = np.arange(-7,1.01,1)
+    gridvals = (log10PCO2,log10PO2,log10PCO,log10PH2,log10PCH4)
     return gridvals
 
 if __name__ == "__main__":

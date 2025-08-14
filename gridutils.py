@@ -226,12 +226,15 @@ class GridInterpolator():
         self.gridvals = gridvals
         self.gridshape = tuple(len(a) for a in gridvals)
 
+        self.min_gridvals = np.array([np.min(a) for a in self.gridvals])
+        self.max_gridvals = np.array([np.max(a) for a in self.gridvals])
+
         with h5py.File(filename, 'r') as f:
             self.data = {}
             for key in f['results'].keys():
                 self.data[key] = f['results'][key][...]
 
-    def make_interpolator(self, key, logspace=False):
+    def make_interpolator(self, key, method='linear', linthresh=1.0, logspace=None):
         """
         Create an interpolator for a grid parameter.
 
@@ -252,18 +255,82 @@ class GridInterpolator():
     
         data = self.data[key]
 
-        # Apply log-space transformation if needed
-        if logspace:
-            data = np.log10(np.maximum(data, 2e-38))
+        # for backwards compatibility
+        if logspace == True:
+            method = 'log'
+
+        if method == 'linear':
+            transform = linear_transform
+            untransform = linear_inverse
+        elif method == 'log':
+            transform = log_transform
+            untransform = log_inverse
+        elif method == 'symlog':
+            transform = symlog_transform_func(linthresh)
+            untransform = symlog_inverse_func(linthresh)
+        else:
+            raise ValueError('`method` can not be: '+method)
+
+        # Apply transformation
+        data = transform(data)
 
         # Create the interpolator
         rgi = interpolate.RegularGridInterpolator(self.gridvals, data)
 
         def interp(vals):
-            out = rgi(vals)
-            if logspace:
-                out = 10.0 ** out
-            return out
+            out = rgi(np.clip(vals, a_min=self.min_gridvals, a_max=self.max_gridvals))
+            out = untransform(out)
+            return out[0]
 
         return interp
     
+# Linear transform
+def linear_transform(x):
+    return x
+def linear_inverse(z):
+    return z
+
+# Log transform
+def log_transform(x):
+    return np.log10(np.maximum(x, 2e-38))
+def log_inverse(z):
+    return 10.0**z
+
+# Symmetric log
+def symlog_transform_func(linthresh):
+    """
+    Symmetric log transform with a linear region around zero.
+    linthresh: values with |y| <= linthresh are mapped linearly.
+    """
+    def func(y):
+        y = np.array(y, dtype=float)
+        sign = np.sign(y)
+        mask = np.abs(y) > linthresh
+        out = np.zeros_like(y)
+
+        # Linear region
+        out[~mask] = y[~mask] / linthresh
+
+        # Logarithmic region
+        out[mask] = sign[mask] * (np.log10(np.abs(y[mask]) / linthresh) + 1.0)
+
+        return out
+    return func
+def symlog_inverse_func(linthresh):
+    """
+    Inverse of the symlog transform.
+    """
+    def func(z):
+        z = np.array(z, dtype=float)
+        sign = np.sign(z)
+        mask = np.abs(z) > 1.0
+        out = np.zeros_like(z)
+
+        # Linear region
+        out[~mask] = z[~mask] * linthresh
+
+        # Logarithmic region
+        out[mask] = sign[mask] * 10.0**(np.abs(z[mask]) - 1.0) * linthresh
+
+        return out
+    return func

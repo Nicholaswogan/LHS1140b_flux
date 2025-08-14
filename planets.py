@@ -40,7 +40,7 @@ LHS1140b = Planet(
     Teq=226,
     transit_duration=2.055*60*60,
     a=0.0946,
-    stellar_flux=0.43*1360.0
+    stellar_flux=0.43*1370.0
 )
 
 LHS1140 = Star(

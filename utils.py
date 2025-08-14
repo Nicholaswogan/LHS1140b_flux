@@ -5,7 +5,11 @@ import numba as nb
 from numba import types
 from scipy import integrate
 from scipy import constants as const
+from scipy import interpolate
 
+from picaso import justdoit as jdi
+from photochem.utils import stars
+from photochem._clima import rebin, rebin_with_errors
 from photochem.clima import AdiabatClimate, ClimaException
 from photochem import EvoAtmosphere, PhotoException
 
@@ -46,20 +50,126 @@ class AdiabatClimateRobust(AdiabatClimate):
         
         return converged
     
-    def RCE_simple_guess(self, P_i):
+    def adjust_convecting_pattern(self, convecting_with_below, remove_conv_param):
+
+        convecting_with_below_copy = convecting_with_below.copy()
+
+        k = 0
+        num_to_switch = int(len(np.where(convecting_with_below_copy)[0])*remove_conv_param)
+        for i in range(len(convecting_with_below_copy)):
+            j = len(convecting_with_below_copy) - i - 1
+            if k >= num_to_switch:
+                break
+            
+            if convecting_with_below_copy[j]:
+                convecting_with_below_copy[j] = False
+                k += 1
+
+        return convecting_with_below_copy
+    
+    def check_for_overconvection(self):
+        "Checks if we are in an overconvecting regime"
+
+        convecting_with_below = self.convecting_with_below
+        
+        # Compute the dT/dP
+        T = np.append(self.T_surf, self.T)
+        P = np.append(self.P_surf, self.P)
+        log10P = np.log10(P)
+        dT_dP = (T[1:] - T[:-1])/(log10P[1:] - log10P[:-1])
+        
+        # Find lowest convective zone
+        ind = -1
+        for i in range(len(convecting_with_below)):
+            if convecting_with_below[i]:
+                ind = i
+                break 
+        
+        # Return if no convective zones
+        if ind == -1:
+            return False, None
+        
+        # Find top of first convective zone
+        ind1 = -1
+        for i in range(ind,len(convecting_with_below)):
+            if not convecting_with_below[i]:
+                ind1 = i
+                break
+                
+        if ind1 == -1 and ind == 0:
+            # Whole atmosphere is convective then we assume overconvective
+            return True, None
+        if ind1 == -1 and ind != 0:
+            # Some convective zone above surface, then we assume it is OK.
+            return False, None
+        if ind1 == 0:
+            # Weird case where the top of the convective zone is
+            # the surface... seems impossible but we account for it anyway.
+            return False, None
+        
+        # Now look at the top of the convective zone
+        if dT_dP[ind1] < -10 and dT_dP[ind1-1] > 0:
+            # If there is a "kink" in the P-T profile then this is overconvection
+            return True, dT_dP[ind1]
+        else:
+            return False, None
+    
+    def RCE_simple_guess(self, P_i, remove_conv_params=None):
+
+        if remove_conv_params is None:
+            remove_conv_params = [0.5, 0.3, 0.2, 0.0]
 
         converged_simple = self.surface_temperature_robust(P_i)
         if not converged_simple:
             # If this fails, then we give up, returning no convergence
             return False
-        
+
         # If simple climate model converged, then save the atmosphere
         T_surf_guess, T_guess, convecting_with_below_guess = self.T_surf, self.T, self.convecting_with_below
-        
-        try:
-            converged = self.RCE(P_i, T_surf_guess, T_guess, convecting_with_below_guess)
-        except ClimaException:
-            converged = False
+
+        remove_conv_param_save = []
+        dT_dP_save = []
+        for remove_conv_param in remove_conv_params:
+
+            convecting_with_below_tmp = self.adjust_convecting_pattern(convecting_with_below_guess, remove_conv_param)
+            
+            try:
+                converged = self.RCE(P_i, T_surf_guess, T_guess, convecting_with_below_tmp)
+            except ClimaException:
+                converged = False
+
+            if converged:
+                overconvecting, dT_dP = self.check_for_overconvection()
+                if dT_dP is not None:
+                    # Save reasonable failures
+                    remove_conv_param_save.append(remove_conv_param)
+                    dT_dP_save.append(dT_dP)
+                if not overconvecting:
+                    # Try other remove_conv_params to see if we
+                    # can get a case without overconvection.
+                    # Note that if the last one works, then 
+                    # the model will report converged, even if
+                    # overconvection is happening.
+                    break
+
+        if converged:
+            if overconvecting and len(dT_dP_save) > 0:
+                # If we made it here, then there are models that converged but all of
+                # them were overconvecting. So, we are going to pick the best one
+                # and stick with it.
+
+                ind = np.argmax(dT_dP_save) # corresponds to the smallist "kink"
+
+                if remove_conv_param == remove_conv_param_save[ind]:
+                    # The best one is the last one, so no work needed
+                    pass
+                else:
+                    # The best one is not the last one, so we must recompute
+                    convecting_with_below_tmp = self.adjust_convecting_pattern(convecting_with_below_guess, remove_conv_param_save[ind])
+                    try:
+                        converged = self.RCE(P_i, T_surf_guess, T_guess, convecting_with_below_tmp)
+                    except ClimaException:
+                        converged = False
 
         return converged
         
@@ -84,10 +194,17 @@ class AdiabatClimateRobust(AdiabatClimate):
 
         return converged
     
-    def RCE_robust(self, P_i, T_guess_mid=None, T_perturbs=None):
+    def RCE_robust(self, P_i, remove_conv_params=None, T_guess_mid=None, T_perturbs=None):
 
-        # First try guess based on simple climate model
-        converged = self.RCE_simple_guess(P_i)
+        # First, we try a single isothermal case
+        converged = self.RCE_isotherm_guess(P_i, T_guess_mid, np.array([0.0]))
+        if converged:
+            overconvecting, _ = self.check_for_overconvection()
+            if not overconvecting:
+                return converged
+
+        # Try guess based on simple climate model
+        converged = self.RCE_simple_guess(P_i, remove_conv_params)
         if converged:
             return converged
 
@@ -125,6 +242,8 @@ class RobustData():
         self.nerrors = None
         self.max_time = None
         self.robust_stepper_initialized = None
+        # Surface pressures
+        self.Pi = None
 
 class EvoAtmosphereRobust(EvoAtmosphere):
 
@@ -149,6 +268,9 @@ class EvoAtmosphereRobust(EvoAtmosphere):
         self.var.autodiff = True
         self.var.atol = 1.0e-23
         self.var.equilibrium_time = 1e15
+
+        # Model state
+        self.max_time_state = None
 
         for i in range(len(self.var.cond_params)):
             self.var.cond_params[i].smooth_factor = 1
@@ -195,6 +317,14 @@ class EvoAtmosphereRobust(EvoAtmosphere):
         rdat.log10P_interp = np.log10(P1.copy()[::-1])
         rdat.T_interp = T1.copy()[::-1]
         rdat.log10edd_interp = np.log10(Kzz1.copy()[::-1])
+        
+        # extrapolate to 1e6 bars
+        T_tmp = interpolate.interp1d(rdat.log10P_interp, rdat.T_interp, bounds_error=False, fill_value='extrapolate')(12)
+        edd_tmp = interpolate.interp1d(rdat.log10P_interp, rdat.log10edd_interp, bounds_error=False, fill_value='extrapolate')(12)
+        rdat.log10P_interp = np.append(rdat.log10P_interp, 12)
+        rdat.T_interp = np.append(rdat.T_interp, T_tmp)
+        rdat.log10edd_interp = np.append(rdat.log10edd_interp, edd_tmp)
+
         rdat.P_desired = P1.copy()
         rdat.T_desired = T1.copy()
         rdat.Kzz_desired = Kzz1.copy()
@@ -234,6 +364,7 @@ class EvoAtmosphereRobust(EvoAtmosphere):
         self.prep_atmosphere(self.wrk.usol)
 
     def initialize_to_PT_bcs(self, P, T, Kzz, mix, Pi):
+        self.rdat.Pi = Pi
         self.set_surface_pressures(Pi)
         self.initialize_to_PT(P, T, Kzz, mix)
 
@@ -257,6 +388,7 @@ class EvoAtmosphereRobust(EvoAtmosphere):
         rdat.total_step_counter = 0
         rdat.nerrors = 0
         rdat.max_time = 0
+        self.max_time_state = None
         self.initialize_stepper(usol)
         rdat.robust_stepper_initialized = True
 
@@ -291,17 +423,24 @@ class EvoAtmosphereRobust(EvoAtmosphere):
                 self.initialize_stepper(usol)
                 rdat.nerrors += 1
 
-                if rdat.nerrors > 10:
+                if rdat.nerrors > 15:
+                    give_up = True
+                    break
+
+            # Reset integrator if we get large magnitude negative numbers
+            if not self.healthy_atmosphere():
+                usol = np.clip(self.wrk.usol.copy(),a_min=1.0e-40,a_max=np.inf)
+                self.initialize_stepper(usol)
+                rdat.nerrors += 1
+
+                if rdat.nerrors > 15:
                     give_up = True
                     break
 
             # Update the max time achieved
-            rdat.max_time = np.maximum(rdat.max_time, self.wrk.tn)
-
-            # Reset integrator if we get large magnitude negative numbers
-            if np.min(self.wrk.mix_history[:,:,0]) < rdat.min_mix_reset:
-                usol = np.clip(self.wrk.usol.copy(),a_min=1.0e-40,a_max=np.inf)
-                self.initialize_stepper(usol)
+            if self.wrk.tn > rdat.max_time:
+                rdat.max_time = self.wrk.tn
+                self.max_time_state = self.model_state_to_dict() # save the model state
 
             # convergence checking
             converged = self.check_for_convergence()
@@ -382,6 +521,98 @@ class EvoAtmosphereRobust(EvoAtmosphere):
                 success = False
                 break
         return success
+    
+    def healthy_atmosphere(self):
+        return np.min(self.wrk.mix_history[:,:,0]) > self.rdat.min_mix_reset
+    
+    def find_steady_state_robust(self):
+
+        # Change some rdat settings
+        self.rdat.freq_update_atol = 100_000
+        self.rdat.max_total_step = 10_000
+
+        # First just try to get to steady-state with standard atol
+        self.var.atol = 1.0e-23
+        converged = self.find_steady_state()
+        if converged:
+            return converged
+
+        # Convergence did not happen. Save the max time state.
+        max_time = self.rdat.max_time
+        max_time_state = deepcopy(self.max_time_state)
+
+        # Lets try a couple different atols.
+        for atol in [1.0e-18, 1.0e-15]:
+            # Lets initialize to max time state
+            self.initialize_from_dict(max_time_state)
+            # Do some smaller number of steps
+            self.rdat.max_total_step = 5_000
+            self.var.atol = atol # set the atol
+            converged = self.find_steady_state() # Integrate
+            if converged:
+                # If converged then lets return
+                return converged
+
+            # No convergence. We re-save max time state
+            if self.rdat.max_time > max_time:
+                max_time = self.rdat.max_time
+                max_time_state = deepcopy(self.max_time_state)
+
+        # No convergence, we reinitialize to max time state and return
+        self.initialize_from_dict(max_time_state)
+
+        return converged
+        
+    def model_state_to_dict(self):
+        """Returns a dictionary containing all information needed to reinitialize the atmospheric
+        state. This dictionary can be used as an input to "initialize_from_dict".
+        """
+
+        if self.rdat.log10P_interp is None:
+            raise Exception('This routine can only be called after `initialize_to_PT_bcs`')
+
+        out = {}
+        out['rdat'] = deepcopy(self.rdat.__dict__)
+        out['top_atmos'] = self.var.top_atmos
+        out['temperature'] = self.var.temperature
+        out['edd'] = self.var.edd
+        out['usol'] = self.wrk.usol
+        out['particle_radius'] = self.var.particle_radius
+
+        # Other settings
+        out['equilibrium_time'] = self.var.equilibrium_time
+        out['verbose'] = self.var.verbose
+        out['atol'] = self.var.atol
+        out['autodiff'] = self.var.autodiff
+
+        return out
+
+    def initialize_from_dict(self, out):
+        """Initializes the model from a dictionary created by the "model_state_to_dict" routine.
+        """
+
+        for key, value in out['rdat'].items():
+            setattr(self.rdat, key, value)
+
+        self.update_vertical_grid(TOA_alt=out['top_atmos'])
+        self.set_temperature(out['temperature'])
+        self.var.edd = out['edd']
+        self.wrk.usol = out['usol']
+        self.var.particle_radius = out['particle_radius']
+        self.update_vertical_grid(TOA_alt=out['top_atmos'])
+
+        # Other settings
+        self.var.equilibrium_time = out['equilibrium_time']
+        self.var.verbose = out['verbose']
+        self.var.atol = out['atol']
+        self.var.autodiff = out['autodiff']
+        
+        # Now set boundary conditions
+        Pi = self.rdat.Pi
+        for sp in Pi:
+            self.set_lower_bc(sp, bc_type='press', press=Pi[sp])
+
+        self.prep_atmosphere(self.wrk.usol)
 
 @nb.experimental.jitclass()
 class TempPressMubar:
@@ -447,12 +678,6 @@ ATMOSPHERE_INIT = \
 1.0e3    1          1000       1e6         
 """
 
-from photochem.utils import stars
-from photochem.clima import rebin
-from photochem._clima import rebin_with_errors
-# from picaso import justdoit as jdi
-# from pandexo.engine import justdoit as pandexo_jdi
-
 class Picaso():
 
     def __init__(self, filename_db, M_planet, R_planet, R_star, opannection_kwargs={}, star_kwargs={}):
@@ -505,6 +730,7 @@ class Picaso():
         return wavl, rprs2
     
     def create_exo_dict(self, R_planet, R_star, total_observing_time, eclipse_duration, kmag, starpath):
+        from pandexo.engine import justdoit as pandexo_jdi
 
         exo_dict = pandexo_jdi.load_exo_dict()
 
@@ -535,6 +761,7 @@ class Picaso():
         return exo_dict
     
     def _run_pandexo(self, R_planet, R_star, total_observing_time, eclipse_duration, kmag, inst, starpath, verbose=False, **kwargs):
+        from pandexo.engine import justdoit as pandexo_jdi
 
         exo_dict = self.create_exo_dict(R_planet, R_star, total_observing_time, eclipse_duration, kmag, starpath)
 
@@ -563,3 +790,4 @@ class Picaso():
             err = err_n
 
         return wavl, F, err
+    
