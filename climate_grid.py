@@ -16,6 +16,7 @@ CLIMATE_MODEL = utils.AdiabatClimateRobust(
 )
 CLIMATE_MODEL.verbose = False
 CLIMATE_MODEL.P_top = 1e2
+CLIMATE_MODEL.xtol_rc = 1e-7
 
 def model(x):
     c = CLIMATE_MODEL
