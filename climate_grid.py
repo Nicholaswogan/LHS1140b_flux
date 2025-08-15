@@ -65,11 +65,11 @@ def make_result(x, c, converged):
     return result
 
 def get_gridvals():
-    log10PCO2 = np.arange(-5,1.01,1)
-    log10PO2 = np.arange(-7,1.01,2)
-    log10PCO = np.arange(-7,1.01,2)
-    log10PH2 = np.arange(-6,0.01,2)
-    log10PCH4 = np.arange(-7,1.01,1)
+    log10PCO2 = np.append(np.arange(-5,1.01,1),1.5)
+    log10PO2 = np.append(np.arange(-7,1.01,2),1.5)
+    log10PCO = np.append(np.arange(-7,1.01,2),1.5)
+    log10PH2 = np.append(np.arange(-6,0.01,2),0.5)
+    log10PCH4 = np.append(np.arange(-7,1.01,1),1.5)
     gridvals = (log10PCO2,log10PO2,log10PCO,log10PH2,log10PCH4)
     return gridvals
 

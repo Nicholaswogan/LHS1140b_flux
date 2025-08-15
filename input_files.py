@@ -13,7 +13,7 @@ def create_climate_inputs():
     climate.species_file_for_climate(
         filename='inputs/species_climate.yaml', 
         species=['H2O','CO2','N2','H2','CH4','CO','O2'], 
-        condensates=['H2O','CO2','CH4']
+        condensates=['H2O']
     )
 
     # Settings file
