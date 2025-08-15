@@ -194,22 +194,47 @@ class AdiabatClimateRobust(AdiabatClimate):
 
         return converged
     
-    def RCE_robust(self, P_i, remove_conv_params=None, T_guess_mid=None, T_perturbs=None):
+    def check_for_steam_dominated(self):
+        ind = self.species_names.index('H2O')
+        return np.all(self.f_i[0,ind] >= self.f_i[0,:])
+    
+    def RCE_robust(self, P_i, remove_conv_params=None, T_guess_mid=None, T_perturbs=None, convective_newton_step_size=0.05, max_rc_iters_convection=5):
+
+        # Set convection parameters
+        self.max_rc_iters_convection = max_rc_iters_convection
+        self.convective_newton_step_size = convective_newton_step_size
 
         # First, we try a single isothermal case
         converged = self.RCE_isotherm_guess(P_i, T_guess_mid, np.array([0.0]))
         if converged:
             overconvecting, _ = self.check_for_overconvection()
-            if not overconvecting:
+            steam_dominated = self.check_for_steam_dominated()
+            if not overconvecting and not steam_dominated:
                 return converged
 
         # Try guess based on simple climate model
         converged = self.RCE_simple_guess(P_i, remove_conv_params)
         if converged:
-            return converged
+            steam_dominated = self.check_for_steam_dominated()
+            if not steam_dominated:
+                return converged
 
         # Next try with isotherms
         converged = self.RCE_isotherm_guess(P_i, T_guess_mid, T_perturbs)
+        if converged:
+            steam_dominated = self.check_for_steam_dominated()
+            if not steam_dominated:
+                return converged
+        
+        # Finally, we make a compromise, and try for a steady-state climate that
+        # has a single convecting layer at depth, and
+        self.max_rc_iters_convection = -1
+        self.convective_newton_step_size = 1e-100
+        converged = self.RCE_simple_guess(P_i)
+        self.max_rc_iters_convection = max_rc_iters_convection
+        self.convective_newton_step_size = convective_newton_step_size
+
+        # We will permit steam dominated here because it probably isn't so crazy
 
         return converged
 
